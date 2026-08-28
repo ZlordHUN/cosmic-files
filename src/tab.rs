@@ -905,7 +905,7 @@ pub fn item_from_trash_entry(
     let name = entry.name.to_string_lossy().into_owned();
     let display_name = Item::display_name(&name);
 
-    let location = crate::trash::trash_item_path(&entry).map(Location::Path);
+    let trash_path = crate::trash::trash_item_path(&entry);
 
     let (mime, icon_handle_grid, icon_handle_list, icon_handle_list_condensed) = match metadata.size
     {
@@ -928,21 +928,29 @@ pub fn item_from_trash_entry(
         }
     };
 
+    let can_thumbnail = trash_path.is_some()
+        && matches!(metadata.size, TrashItemSize::Bytes(_))
+        && matches!(mime.type_(), mime::IMAGE | mime::VIDEO);
+
     Item {
         name,
         display_name,
         is_mount_point: false,
         metadata: ItemMetadata::Trash { metadata, entry },
         hidden: false,
-        location_opt: location,
+        location_opt: trash_path.clone().map(Location::Path),
         image_dimensions: (mime.type_() == mime::IMAGE)
-            .then(|| image::image_dimensions(&original_path).ok())
+            .then(|| {
+                trash_path
+                    .as_deref()
+                    .and_then(|path| image::image_dimensions(path).ok())
+            })
             .flatten(),
         mime,
         icon_handle_grid,
         icon_handle_list,
         icon_handle_list_condensed,
-        thumbnail_opt: Some(ItemThumbnail::NotImage),
+        thumbnail_opt: (!can_thumbnail).then_some(ItemThumbnail::NotImage),
         button_id: widget::Id::unique(),
         pos_opt: Cell::new(None),
         rect_opt: Cell::new(None),
@@ -7087,6 +7095,9 @@ impl Tab {
                 let metadata = item.metadata.clone();
                 let can_thumbnail = match metadata {
                     ItemMetadata::Path { .. } => true,
+                    ItemMetadata::Trash { metadata, .. } => {
+                        matches!(metadata.size, TrashItemSize::Bytes(_))
+                    }
                     #[cfg(feature = "gvfs")]
                     ItemMetadata::GvfsPath { .. } => true,
                     _ => false,
@@ -7545,7 +7556,8 @@ mod tests {
     use test_log::test;
 
     use super::{
-        ItemMetadata, ItemThumbnail, Location, Message, Tab, respond_to_scroll_direction, scan_path,
+        ItemMetadata, ItemThumbnail, Location, Message, Tab, item_from_trash_entry,
+        respond_to_scroll_direction, scan_path,
     };
     use crate::app::test_utils::{
         NAME_LEN, NUM_DIRS, NUM_FILES, NUM_HIDDEN, NUM_NESTED, assert_eq_tab_path, empty_fs,
@@ -7920,6 +7932,73 @@ mod tests {
             widget::Id::unique(),
             None,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn trash_media_files_are_thumbnail_candidates() -> io::Result<()> {
+        let dir = TempDir::new()?;
+
+        for (name, expected_type, expected_dimensions) in [
+            ("photo.png", mime::IMAGE, Some((2, 3))),
+            ("video.mp4", mime::VIDEO, None),
+        ] {
+            let trash_path = dir.path().join(name);
+            if expected_type == mime::IMAGE {
+                image::RgbaImage::new(2, 3)
+                    .save(&trash_path)
+                    .map_err(io::Error::other)?;
+            } else {
+                fs::File::create(&trash_path)?;
+            }
+            let item = item_from_trash_entry(
+                trash::TrashItem {
+                    id: trash_path.as_os_str().to_os_string(),
+                    name: name.into(),
+                    original_parent: PathBuf::from("/original"),
+                    time_deleted: 0,
+                },
+                trash::TrashItemMetadata {
+                    size: trash::TrashItemSize::Bytes(0),
+                },
+                IconSizes::default(),
+            );
+
+            assert_eq!(item.location_opt, Some(Location::Path(trash_path)));
+            assert_eq!(item.mime.type_(), expected_type);
+            assert_eq!(item.image_dimensions, expected_dimensions);
+            assert!(
+                item.thumbnail_opt.is_none(),
+                "trashed media should be queued for thumbnailing"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn trash_directories_and_non_media_files_keep_generic_icons() -> io::Result<()> {
+        let dir = TempDir::new()?;
+
+        for (name, size) in [
+            ("folder", trash::TrashItemSize::Entries(0)),
+            ("document.txt", trash::TrashItemSize::Bytes(0)),
+        ] {
+            let trash_path = dir.path().join(name);
+            let item = item_from_trash_entry(
+                trash::TrashItem {
+                    id: trash_path.as_os_str().to_os_string(),
+                    name: name.into(),
+                    original_parent: PathBuf::from("/original"),
+                    time_deleted: 0,
+                },
+                trash::TrashItemMetadata { size },
+                IconSizes::default(),
+            );
+
+            assert!(matches!(item.thumbnail_opt, Some(ItemThumbnail::NotImage)));
+        }
 
         Ok(())
     }
