@@ -194,6 +194,27 @@ pub struct MimeApp {
 }
 
 impl MimeApp {
+    pub fn terminal_command(&self, path: &Path) -> Option<process::Command> {
+        let mut command = self.command::<&str>(&[])?.into_iter().next()?;
+        let exec_arg = match self.id.as_str() {
+            "org.gnome.Terminal" | "org.gnome.Console" => "--",
+            "xfce4-terminal" | "terminator" => "--execute",
+            _ => "-e",
+        };
+        command.current_dir(path.parent()?);
+        // Pass the filename separately: the script's shebang selects its interpreter.
+        // Keep the wrapper alive after exit (including Ctrl+C) so output stays visible.
+        command.args([
+            exec_arg,
+            "sh",
+            "-c",
+            r#"trap : INT; "$1"; status=$?; printf '\n%s\n' "$2"; read -r reply; exit "$status""#,
+            "cosmic-files",
+        ]);
+        command.arg(path).arg(crate::fl!("press-enter-to-close"));
+        Some(command)
+    }
+
     //TODO: move to libcosmic, support multiple files
     pub fn command<O: AsRef<OsStr>>(&self, path_opt: &[O]) -> Option<Vec<process::Command>> {
         exec_to_command(

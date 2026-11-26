@@ -45,6 +45,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::Key as SlotMapKey;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ffi::{CString, OsString};
 use std::future::Future;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -169,6 +170,7 @@ pub enum Action {
     OpenTerminal,
     OpenWith,
     RunContextAction(usize),
+    RunInTerminal,
     Paste,
     PermanentlyDelete,
     Preview,
@@ -246,6 +248,7 @@ impl Action {
             Self::RunContextAction(action) => {
                 Message::TabMessage(entity_opt, tab::Message::RunContextAction(*action))
             }
+            Self::RunInTerminal => Message::RunInTerminal(entity_opt),
             Self::Paste => Message::Paste(entity_opt),
             Self::PermanentlyDelete => Message::PermanentlyDelete(entity_opt),
             Self::Preview => Message::Preview(entity_opt),
@@ -388,6 +391,7 @@ pub enum Message {
     NotifyEvents(Vec<DebouncedEvent>),
     NotifyWatcher(WatcherWrapper),
     OpenTerminal(Option<Entity>),
+    RunInTerminal(Option<Entity>),
     OpenInNewTab(Option<Entity>),
     OpenInNewWindow(Option<Entity>),
     OpenItemLocation(Option<Entity>),
@@ -594,6 +598,7 @@ pub enum DialogPage {
     },
     SetExecutableAndLaunch {
         path: PathBuf,
+        terminal_command: Option<(OsString, Vec<OsString>)>,
     },
     FavoritePathError {
         path: PathBuf,
@@ -835,7 +840,10 @@ impl App {
                             io::ErrorKind::PermissionDenied => {
                                 // If permission is denied, try marking as executable, then running
                                 tasks.push(self.push_dialog(
-                                    DialogPage::SetExecutableAndLaunch { path },
+                                    DialogPage::SetExecutableAndLaunch {
+                                        path,
+                                        terminal_command: None,
+                                    },
                                     Some(SET_EXECUTABLE_AND_LAUNCH_CONFIRM_BUTTON_ID.clone()),
                                 ));
                             }
@@ -3249,8 +3257,14 @@ impl Application for App {
                         DialogPage::Replace { .. } => {
                             log::warn!("replace dialog should be completed with replace result");
                         }
-                        DialogPage::SetExecutableAndLaunch { path } => {
-                            tasks.push(self.operation(Operation::SetExecutableAndLaunch { path }));
+                        DialogPage::SetExecutableAndLaunch {
+                            path,
+                            terminal_command,
+                        } => {
+                            tasks.push(self.operation(Operation::SetExecutableAndLaunch {
+                                path,
+                                terminal_command,
+                            }));
                         }
                         DialogPage::FavoritePathError { entity, .. } => {
                             if let Some(FavoriteIndex(favorite_i)) =
@@ -3708,6 +3722,52 @@ impl Application for App {
                     log::warn!("message did not contain notify watcher");
                 }
             },
+            Message::RunInTerminal(entity_opt) => {
+                let entity = entity_opt.unwrap_or_else(|| self.tab_model.active());
+                let selected: Vec<_> = self
+                    .tab_model
+                    .data::<Tab>(entity)
+                    .and_then(|tab| tab.items_opt())
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| item.state.selected)
+                    .collect();
+                if let [item] = selected.as_slice()
+                    && item.can_run_in_terminal()
+                    && let Some(path) = item.path_opt()
+                    && let Some(terminal) = self.mime_app_cache.terminal()
+                    && let Some(mut command) = terminal.terminal_command(path)
+                    && let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes())
+                {
+                    // SAFETY: c_path is a valid, NUL-terminated path for the duration of the call.
+                    if unsafe {
+                        libc::faccessat(
+                            libc::AT_FDCWD,
+                            c_path.as_ptr(),
+                            libc::X_OK,
+                            libc::AT_EACCESS,
+                        )
+                    } != 0
+                    {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::PermissionDenied {
+                            return self.push_dialog(
+                                DialogPage::SetExecutableAndLaunch {
+                                    path: path.clone(),
+                                    terminal_command: Some((
+                                        command.get_program().to_owned(),
+                                        command.get_args().map(OsString::from).collect(),
+                                    )),
+                                },
+                                Some(SET_EXECUTABLE_AND_LAUNCH_CONFIRM_BUTTON_ID.clone()),
+                            );
+                        }
+                        log::warn!("failed to access {}: {err}", path.display());
+                    } else if let Err(err) = spawn_detached(&mut command) {
+                        log::warn!("failed to run {} in terminal: {err}", path.display());
+                    }
+                }
+            }
             Message::OpenTerminal(entity_opt) => {
                 if let Some(terminal) = self.mime_app_cache.terminal() {
                     let mut paths = Box::from([]);
@@ -6244,7 +6304,7 @@ impl Application for App {
                         )
                 }
             }
-            DialogPage::SetExecutableAndLaunch { path } => {
+            DialogPage::SetExecutableAndLaunch { path, .. } => {
                 let name = match path.file_name() {
                     Some(file_name) => file_name.to_str(),
                     None => path.as_os_str().to_str(),

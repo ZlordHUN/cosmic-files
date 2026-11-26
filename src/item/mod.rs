@@ -540,6 +540,15 @@ impl Item {
         self.mime.type_() == mime::IMAGE || self.mime.type_() == mime::TEXT
     }
 
+    pub fn can_run_in_terminal(&self) -> bool {
+        matches!(&self.metadata, ItemMetadata::Path { metadata, .. } if metadata.is_file())
+            && self.path_opt().is_some()
+            && crate::mime_icon::is_mime_subclass_of(
+                &self.mime,
+                &"application/x-shellscript".parse().unwrap(),
+            )
+    }
+
     pub fn file_metadata(&self) -> Option<Metadata> {
         match &self.metadata {
             ItemMetadata::Path { metadata, .. } => Some(metadata.clone()),

@@ -2,6 +2,7 @@ use compio::runtime::JoinError;
 use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::{self, SinkExt, StreamExt, stream};
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -429,6 +430,7 @@ pub enum Operation {
     /// Set executable and launch
     SetExecutableAndLaunch {
         path: PathBuf,
+        terminal_command: Option<(OsString, Vec<OsString>)>,
     },
     /// Set permissions
     SetPermissions {
@@ -562,7 +564,7 @@ impl Operation {
             }
             Self::RemoveFromRecents { paths } => fl!("removing-from-recents", items = paths.len()),
             Self::Restore { items } => fl!("restoring", items = items.len(), progress = progress()),
-            Self::SetExecutableAndLaunch { path } => {
+            Self::SetExecutableAndLaunch { path, .. } => {
                 fl!("setting-executable-and-launching", name = file_name(path))
             }
             Self::SetPermissions { path, mode } => {
@@ -627,7 +629,7 @@ impl Operation {
             Self::RemoveFromRecents { paths } => fl!("removed-from-recents", items = paths.len()),
             Self::Rename { from, to } => fl!("renamed", from = file_name(from), to = file_name(to)),
             Self::Restore { items } => fl!("restored", items = items.len()),
-            Self::SetExecutableAndLaunch { path } => {
+            Self::SetExecutableAndLaunch { path, .. } => {
                 fl!("set-executable-and-launched", name = file_name(path))
             }
             Self::SetPermissions { path, mode } => {
@@ -1144,7 +1146,10 @@ impl Operation {
                     selected: paths,
                 })
             }
-            Self::SetExecutableAndLaunch { path } => {
+            Self::SetExecutableAndLaunch {
+                path,
+                terminal_command,
+            } => {
                 controller
                     .check()
                     .await
@@ -1168,7 +1173,16 @@ impl Operation {
                             .map_err(|e| OperationError::from_err(e, &controller))?;
                     }
 
-                    let mut command = std::process::Command::new(path);
+                    let mut command = if let Some((program, args)) = terminal_command {
+                        let mut command = std::process::Command::new(program);
+                        command.args(args);
+                        if let Some(parent) = path.parent() {
+                            command.current_dir(parent);
+                        }
+                        command
+                    } else {
+                        std::process::Command::new(path)
+                    };
                     spawn_detached(&mut command)
                         .map_err(|e| OperationError::from_err(e, &controller))?;
 

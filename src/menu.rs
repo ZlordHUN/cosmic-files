@@ -84,10 +84,12 @@ pub fn context_menu(
     let mut selected_types: Vec<Mime> = vec![];
     let mut selected_mount_point = 0;
     let mut any_trash_item = false;
+    let mut selected_shell_script = false;
     if let Some(items) = tab.items_opt() {
         for item in items {
             if item.state.selected {
                 selected += 1;
+                selected_shell_script = item.can_run_in_terminal();
                 if item.metadata.is_dir() {
                     selected_mount_point += i32::from(item.is_mount_point);
                     selected_dir += 1;
@@ -186,6 +188,8 @@ pub fn context_menu(
                     children.push(menu_item(fl!("menu-open-with"), Action::OpenWith));
                     if selected_dir == 1 {
                         children.push(menu_item(fl!("open-in-terminal"), Action::OpenTerminal));
+                    } else if selected_shell_script {
+                        children.push(menu_item(fl!("run-in-terminal"), Action::RunInTerminal));
                     }
                 }
                 if tab.location.is_recents() || matches!(tab.location, Location::Search(..)) {
